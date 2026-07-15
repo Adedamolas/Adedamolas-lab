@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import { useTexture } from "@react-three/drei";
 import * as THREE from "three";
@@ -18,42 +25,42 @@ interface GalleryImage {
 
 const IMAGES: GalleryImage[] = [
   {
-    src: "/images/aurora.png",
+    src: "/images/gl/aurora.webp",
     title: "Aurora Residence",
     meta: "hospitality — 2026",
     width: "w-full md:w-3/4",
     align: "start",
   },
   {
-    src: "/images/icca.png",
+    src: "/images/gl/icca.webp",
     title: "ICCA Nigeria",
     meta: "non-profit — 2026",
     width: "w-full md:w-3/5",
     align: "end",
   },
   {
-    src: "/images/nichlorine.png",
+    src: "/images/gl/nichlorine.webp",
     title: "Nichlorine",
     meta: "portfolio — 2025",
     width: "w-full md:w-2/3",
     align: "center",
   },
   {
-    src: "/images/onyi.png",
+    src: "/images/gl/onyi.webp",
     title: "Onyi",
     meta: "product — 2025",
     width: "w-full md:w-3/5",
     align: "start",
   },
   {
-    src: "/images/bass.png",
+    src: "/images/gl/bass.webp",
     title: "Bass Architect Studio",
     meta: "architecture — 2023",
     width: "w-full md:w-3/4",
     align: "end",
   },
   {
-    src: "/images/commentpad.png",
+    src: "/images/gl/commentpad.webp",
     title: "Commently",
     meta: "product — 2024",
     width: "w-full md:w-2/3",
@@ -67,18 +74,41 @@ interface ItemState {
   src: string;
   hoverTarget: number;
   mouseTarget: THREE.Vector2;
+  /** Cached document-space layout — measured on mount/resize, not per frame */
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+}
+
+function measureItem(item: ItemState) {
+  const rect = item.el.getBoundingClientRect();
+  item.top = rect.top + window.scrollY;
+  item.left = rect.left + window.scrollX;
+  item.width = rect.width;
+  item.height = rect.height;
 }
 
 function DistortionPlane({
-  item,
+  src,
+  getItem,
   velocity,
+  onReady,
 }: {
-  item: ItemState;
+  src: string;
+  getItem: (src: string) => ItemState | undefined;
   velocity: React.RefObject<number>;
+  onReady: () => void;
 }) {
   const mesh = useRef<THREE.Mesh>(null);
   const material = useRef<THREE.ShaderMaterial>(null);
-  const texture = useTexture(item.src);
+  const texture = useTexture(src);
+
+  // This effect only runs once the texture has resolved (useTexture suspends),
+  // so it doubles as the "safe to hide the DOM image" signal.
+  useEffect(() => {
+    onReady();
+  }, [onReady]);
 
   const uniforms = useMemo(() => {
     const image = texture.image as HTMLImageElement;
@@ -95,17 +125,33 @@ function DistortionPlane({
 
   useFrame((state, delta) => {
     if (!mesh.current || !material.current) return;
-    const u = material.current.uniforms;
+    const item = getItem(src);
+    if (!item) {
+      mesh.current.visible = false;
+      return;
+    }
+    // Self-heal: measured lazily if the mount-time measure hasn't run yet
+    if (item.width === 0) measureItem(item);
 
-    // Pin the plane to its DOM twin, in pixels (ortho camera = 1 unit : 1 px)
-    const rect = item.el.getBoundingClientRect();
+    // Viewport-space position from cached layout — no per-frame DOM reads
+    const viewTop = item.top - window.scrollY;
+
+    // Skip everything for planes far offscreen
+    const margin = 150;
+    const visible =
+      viewTop < state.size.height + margin && viewTop + item.height > -margin;
+    mesh.current.visible = visible;
+    if (!visible) return;
+
     mesh.current.position.set(
-      rect.left + rect.width / 2 - state.size.width / 2,
-      -(rect.top + rect.height / 2) + state.size.height / 2,
+      item.left - window.scrollX + item.width / 2 - state.size.width / 2,
+      -(viewTop + item.height / 2) + state.size.height / 2,
       0,
     );
-    mesh.current.scale.set(rect.width, rect.height, 1);
-    u.uPlaneAspect.value = rect.width / rect.height;
+    mesh.current.scale.set(item.width, item.height, 1);
+
+    const u = material.current.uniforms;
+    u.uPlaneAspect.value = item.width / item.height;
 
     // Ease interaction values — never snap
     u.uTime.value += delta;
@@ -133,7 +179,7 @@ function DistortionPlane({
 
   return (
     <mesh ref={mesh}>
-      <planeGeometry args={[1, 1, 32, 32]} />
+      <planeGeometry args={[1, 1, 16, 16]} />
       <shaderMaterial
         ref={material}
         uniforms={uniforms}
@@ -152,81 +198,111 @@ const alignClass = {
 
 export default function DistortionGallery() {
   const { velocity } = useLenisContext();
-  const [items, setItems] = useState<ItemState[]>([]);
   const [glReady, setGlReady] = useState(false);
-  const registered = useRef(new Map<string, ItemState>());
-
-  // Ref callbacks must be stable across renders — a fresh function each render
-  // makes React detach/reattach every ref, and any setState in there loops.
-  const refCallbacks = useRef(
-    new Map<string, (el: HTMLDivElement | null) => void>(),
-  );
-  const register = useCallback((src: string) => {
-    let cb = refCallbacks.current.get(src);
-    if (!cb) {
-      cb = (el: HTMLDivElement | null) => {
+  const readyCount = useRef(0);
+  // One stable registry for interaction state and the ref callbacks that fill
+  // it. Lazily-initialized state (not refs) keeps identities fixed across
+  // renders — fresh ref callbacks each render make React detach/reattach every
+  // ref, and any setState in there loops.
+  const [store] = useState(() => {
+    const registered = new Map<string, ItemState>();
+    const refCallbacks = new Map<string, (el: HTMLDivElement | null) => void>();
+    for (const img of IMAGES) {
+      refCallbacks.set(img.src, (el: HTMLDivElement | null) => {
         if (!el) {
-          registered.current.delete(src);
+          registered.delete(img.src);
           return;
         }
-        const existing = registered.current.get(src);
+        const existing = registered.get(img.src);
         if (existing) {
           existing.el = el;
           return;
         }
-        registered.current.set(src, {
+        registered.set(img.src, {
           el,
-          src,
+          src: img.src,
           hoverTarget: 0,
           mouseTarget: new THREE.Vector2(0.5, 0.5),
+          top: 0,
+          left: 0,
+          width: 0,
+          height: 0,
         });
-      };
-      refCallbacks.current.set(src, cb);
+      });
     }
-    return cb;
-  }, []);
+    return { registered, refCallbacks };
+  });
 
-  // Refs attach before effects run, so every image is registered by now
+  // Layout is measured on mount and on resize/font-load — never in the loop.
   useEffect(() => {
-    setItems(
-      IMAGES.map((img) => registered.current.get(img.src)).filter(
-        (item): item is ItemState => Boolean(item),
-      ),
-    );
+    const measureAll = () =>
+      store.registered.forEach((item) => measureItem(item));
+
+    measureAll();
+    window.addEventListener("resize", measureAll);
+    // Font swaps shift caption heights, which shifts every figure below them
+    document.fonts?.ready.then(measureAll);
+
+    return () => window.removeEventListener("resize", measureAll);
+  }, [store]);
+
+  const getItem = useCallback(
+    (src: string) => store.registered.get(src),
+    [store],
+  );
+
+  const onPlaneReady = useCallback(() => {
+    readyCount.current += 1;
+    if (readyCount.current >= IMAGES.length) setGlReady(true);
   }, []);
 
-  const onMove = useCallback((src: string, e: React.PointerEvent) => {
-    const item = registered.current.get(src);
-    if (!item) return;
-    const rect = item.el.getBoundingClientRect();
-    item.mouseTarget.set(
-      (e.clientX - rect.left) / rect.width,
-      1 - (e.clientY - rect.top) / rect.height,
-    );
-  }, []);
+  const onMove = useCallback(
+    (src: string, e: React.PointerEvent) => {
+      const item = store.registered.get(src);
+      if (!item) return;
+      const rect = item.el.getBoundingClientRect();
+      item.mouseTarget.set(
+        (e.clientX - rect.left) / rect.width,
+        1 - (e.clientY - rect.top) / rect.height,
+      );
+    },
+    [store],
+  );
 
-  const setHover = useCallback((src: string, value: number) => {
-    const item = registered.current.get(src);
-    if (item) item.hoverTarget = value;
-  }, []);
+  const setHover = useCallback(
+    (src: string, value: number) => {
+      const item = store.registered.get(src);
+      if (item) item.hoverTarget = value;
+    },
+    [store],
+  );
 
   return (
     <>
       {/* WebGL layer — draws over the DOM images, ignores the pointer */}
       <div className="pointer-events-none fixed inset-0 z-10">
-        {items.length > 0 && (
-          <Canvas
-            orthographic
-            camera={{ position: [0, 0, 100], zoom: 1 }}
-            dpr={[1, 2]}
-            gl={{ antialias: true, alpha: true }}
-            onCreated={() => setGlReady(true)}
-          >
-            {items.map((item) => (
-              <DistortionPlane key={item.src} item={item} velocity={velocity} />
+        <Canvas
+          orthographic
+          camera={{ position: [0, 0, 100], zoom: 1 }}
+          dpr={[1, 1.5]}
+          gl={{
+            antialias: false,
+            alpha: true,
+            powerPreference: "high-performance",
+          }}
+        >
+          <Suspense fallback={null}>
+            {IMAGES.map((img) => (
+              <DistortionPlane
+                key={img.src}
+                src={img.src}
+                getItem={getItem}
+                velocity={velocity}
+                onReady={onPlaneReady}
+              />
             ))}
-          </Canvas>
-        )}
+          </Suspense>
+        </Canvas>
       </div>
 
       {/* DOM layer — owns layout, pointer events and the fallback render */}
@@ -237,13 +313,13 @@ export default function DistortionGallery() {
             className={`${img.width} ${alignClass[img.align]}`}
           >
             <div
-              ref={register(img.src)}
+              ref={store.refCallbacks.get(img.src)}
               className="relative aspect-[16/10] overflow-hidden"
               onPointerMove={(e) => onMove(img.src, e)}
               onPointerEnter={() => setHover(img.src, 1)}
               onPointerLeave={() => setHover(img.src, 0)}
             >
-              {/* Keeps layout + acts as fallback until WebGL is up */}
+              {/* Keeps layout + stays visible until every texture is on the GPU */}
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src={img.src}

@@ -23,7 +23,7 @@ interface BlobState {
   poke: THREE.Vector3;
 }
 
-function Blob({ state }: { state: BlobState }) {
+function Blob({ stateRef }: { stateRef: React.RefObject<BlobState> }) {
   const mesh = useRef<THREE.Mesh>(null);
   const material = useRef<THREE.ShaderMaterial>(null);
 
@@ -38,6 +38,7 @@ function Blob({ state }: { state: BlobState }) {
 
   const onMove = (e: ThreeEvent<PointerEvent>) => {
     // Local-space contact direction — the dent follows the pointer
+    const state = stateRef.current;
     if (!mesh.current) return;
     const local = mesh.current.worldToLocal(e.point.clone()).normalize();
     state.poke.copy(local);
@@ -48,6 +49,7 @@ function Blob({ state }: { state: BlobState }) {
 
   useFrame((three, delta) => {
     if (!mesh.current || !material.current) return;
+    const state = stateRef.current;
     const dt = Math.min(delta, 1 / 30);
 
     // Pressure target: hardware pressure wins; otherwise holding ramps it up
@@ -81,16 +83,16 @@ function Blob({ state }: { state: BlobState }) {
       ref={mesh}
       onPointerMove={onMove}
       onPointerDown={(e) => {
-        state.pressed = true;
+        stateRef.current.pressed = true;
         onMove(e);
       }}
       onPointerUp={() => {
-        state.pressed = false;
-        state.hardware = 0;
+        stateRef.current.pressed = false;
+        stateRef.current.hardware = 0;
       }}
       onPointerLeave={() => {
-        state.pressed = false;
-        state.hardware = 0;
+        stateRef.current.pressed = false;
+        stateRef.current.hardware = 0;
       }}
     >
       <icosahedronGeometry args={[1, 64]} />
@@ -107,25 +109,22 @@ function Blob({ state }: { state: BlobState }) {
 export default function PressureBlob() {
   const readout = useRef<HTMLSpanElement>(null);
 
-  const state = useMemo<BlobState>(
-    () => ({
-      target: 0,
-      value: 0,
-      velocity: 0,
-      pressed: false,
-      heldFor: 0,
-      hardware: 0,
-      poke: new THREE.Vector3(0, 1, 0),
-    }),
-    [],
-  );
+  const stateRef = useRef<BlobState>({
+    target: 0,
+    value: 0,
+    velocity: 0,
+    pressed: false,
+    heldFor: 0,
+    hardware: 0,
+    poke: new THREE.Vector3(0, 1, 0),
+  });
 
   // Drive the DOM readout off the same spring, outside React
   useEffect(() => {
     let rafId: number;
     const tick = () => {
       if (readout.current) {
-        readout.current.textContent = Math.max(state.value, 0)
+        readout.current.textContent = Math.max(stateRef.current.value, 0)
           .toFixed(2)
           .padStart(4, "0");
       }
@@ -133,7 +132,7 @@ export default function PressureBlob() {
     };
     rafId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafId);
-  }, [state]);
+  }, []);
 
   return (
     <div className="relative h-[calc(100dvh-3rem)] w-full touch-none">
@@ -142,7 +141,7 @@ export default function PressureBlob() {
         dpr={[1, 2]}
         gl={{ antialias: true, alpha: true }}
       >
-        <Blob state={state} />
+        <Blob stateRef={stateRef} />
       </Canvas>
 
       {/* Readout — a nod to the trackpad scale */}
