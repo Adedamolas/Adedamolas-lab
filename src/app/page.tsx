@@ -3,11 +3,11 @@ import Link from "next/link";
 const experiments = [
   {
     number: "001",
-    title: "Distortion Gallery",
+    title: "ASCII Engine",
     description:
-      "Project screenshots as WebGL planes — hover ripples, scroll bends, chromatic aberration.",
-    tags: ["GLSL", "R3F", "Lenis"],
-    href: "/distortion",
+      "Turn your images and videos into ASCII art, ordered dither and halftone — live on the GPU.",
+    tags: ["GLSL", "Dither", "Video"],
+    href: "/ascii",
   },
   {
     number: "002",
